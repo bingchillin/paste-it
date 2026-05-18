@@ -41,3 +41,7 @@ apps/extension/
 
 # Claude Code project settings
 .claude/
+
+# Prisma generated client and compiled package
+node_modules/.prisma/
+packages/database/dist/

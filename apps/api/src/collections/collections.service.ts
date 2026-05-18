@@ -1,61 +1,80 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { Collection, CollectionDocument } from './collection.schema';
+import { PrismaService } from '../prisma/prisma.service';
+
+const COLLECTION_SELECT = {
+  id: true,
+  name: true,
+  color: true,
+  position: true,
+  x: true,
+  y: true,
+  collapsed: true,
+  archived: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
 @Injectable()
 export class CollectionsService {
-  constructor(@InjectModel(Collection.name) private model: Model<CollectionDocument>) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  private toDto(doc: any) {
-    if (!doc) return null;
-    const { _id, __v, userId, ...rest } = doc;
-    return { ...rest, id: String(_id) };
-  }
-
-  async findAll(userId: string) {
-    const docs = await this.model.find({ userId }).sort({ position: 1 }).lean();
-    return docs.map((d) => this.toDto(d));
+  findAll(userId: string) {
+    return this.prisma.collection.findMany({
+      where: { userId },
+      orderBy: { position: 'asc' },
+      select: COLLECTION_SELECT,
+    });
   }
 
   async create(userId: string, dto: any) {
-    const count = await this.model.countDocuments({ userId });
-    const doc = await this.model.create({
-      ...dto,
-      userId,
-      position: dto.position ?? count,
+    const count = await this.prisma.collection.count({ where: { userId } });
+    return this.prisma.collection.create({
+      data: {
+        id: dto._id ?? undefined,
+        userId,
+        name: dto.name,
+        color: dto.color,
+        position: dto.position ?? count,
+        x: dto.x ?? 0,
+        y: dto.y ?? 0,
+        collapsed: dto.collapsed ?? false,
+        archived: dto.archived ?? false,
+      },
+      select: COLLECTION_SELECT,
     });
-    return this.toDto(doc.toObject());
   }
 
   async update(userId: string, id: string, dto: any) {
-    const doc = await this.model.findOneAndUpdate(
-      { _id: id, userId },
-      { $set: dto },
-      { new: true },
-    );
-    if (!doc) throw new NotFoundException();
-    return this.toDto(doc.toObject());
+    const { _id, ...data } = dto;
+    const existing = await this.prisma.collection.findFirst({ where: { id, userId } });
+    if (!existing) throw new NotFoundException();
+    return this.prisma.collection.update({
+      where: { id },
+      data,
+      select: COLLECTION_SELECT,
+    });
   }
 
   async delete(userId: string, id: string) {
-    const doc = await this.model.findOneAndDelete({ _id: id, userId });
-    if (!doc) throw new NotFoundException();
+    const existing = await this.prisma.collection.findFirst({ where: { id, userId } });
+    if (!existing) throw new NotFoundException();
+    await this.prisma.collection.delete({ where: { id } });
     return { id };
   }
 
   async reorder(userId: string, orderedIds: string[]) {
     await Promise.all(
       orderedIds.map((id, position) =>
-        this.model.updateOne({ _id: id, userId }, { $set: { position } }),
+        this.prisma.collection.updateMany({ where: { id, userId }, data: { position } }),
       ),
     );
   }
 
   async bulkCreate(userId: string, collections: any[]): Promise<any[]> {
-    const docs = await this.model.insertMany(
-      collections.map((c, i) => ({ ...c, userId, position: c.position ?? i })),
+    return Promise.all(
+      collections.map((c, i) =>
+        this.create(userId, { ...c, position: c.position ?? i }),
+      ),
     );
-    return docs.map((d) => this.toDto(d.toObject()));
   }
 }

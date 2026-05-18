@@ -1,76 +1,117 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { Card, CardDocument } from './card.schema';
+import { PrismaService } from '../prisma/prisma.service';
+
+const INCLUDE_COLLECTIONS = {
+  collections: { select: { collectionId: true } },
+} as const;
 
 @Injectable()
 export class CardsService {
-  constructor(@InjectModel(Card.name) private model: Model<CardDocument>) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  private toDto(doc: any) {
-    if (!doc) return null;
-    const { _id, __v, userId, ...rest } = doc;
-    return { ...rest, id: String(_id) };
+  private toDto(card: any) {
+    const { userId, collections, user, ...rest } = card;
+    return {
+      ...rest,
+      collectionIds: (collections ?? []).map((c: any) => c.collectionId),
+    };
   }
 
   async findAll(userId: string) {
-    const docs = await this.model.find({ userId }).sort({ position: 1 }).lean();
-    return docs.map((d) => this.toDto(d));
+    const cards = await this.prisma.card.findMany({
+      where: { userId },
+      orderBy: { position: 'asc' },
+      include: INCLUDE_COLLECTIONS,
+    });
+    return cards.map(this.toDto.bind(this));
   }
 
   async findByCollection(userId: string, collectionId: string) {
-    const docs = await this.model
-      .find({ userId, collectionIds: collectionId })
-      .sort({ position: 1 })
-      .lean();
-    return docs.map((d) => this.toDto(d));
+    const cards = await this.prisma.card.findMany({
+      where: { userId, collections: { some: { collectionId } } },
+      orderBy: { position: 'asc' },
+      include: INCLUDE_COLLECTIONS,
+    });
+    return cards.map(this.toDto.bind(this));
   }
 
   async create(userId: string, dto: any) {
-    const collectionId = dto.collectionIds?.[0];
+    const { _id, collectionIds = [], ...rest } = dto;
+    const collectionId = collectionIds[0];
     const count = collectionId
-      ? await this.model.countDocuments({ userId, collectionIds: collectionId })
+      ? await this.prisma.cardCollection.count({ where: { collectionId } })
       : 0;
-    const doc = await this.model.create({
-      ...dto,
-      userId,
-      position: dto.position ?? count,
+
+    const card = await this.prisma.card.create({
+      data: {
+        id: _id ?? undefined,
+        userId,
+        title: rest.title,
+        url: rest.url ?? null,
+        notes: rest.notes ?? null,
+        position: rest.position ?? count,
+        linkPreview: rest.linkPreview ?? null,
+        collections: collectionIds.length
+          ? { create: collectionIds.map((cid: string) => ({ collectionId: cid })) }
+          : undefined,
+      },
+      include: INCLUDE_COLLECTIONS,
     });
-    return this.toDto(doc.toObject());
+    return this.toDto(card);
   }
 
   async update(userId: string, id: string, dto: any) {
-    const doc = await this.model.findOneAndUpdate(
-      { _id: id, userId },
-      { $set: dto },
-      { new: true },
-    );
-    if (!doc) throw new NotFoundException();
-    return this.toDto(doc.toObject());
+    const { _id, collectionIds, ...data } = dto;
+    const existing = await this.prisma.card.findFirst({ where: { id, userId } });
+    if (!existing) throw new NotFoundException();
+
+    const card = await this.prisma.card.update({
+      where: { id },
+      data: {
+        ...data,
+        ...(collectionIds !== undefined
+          ? {
+              collections: {
+                deleteMany: {},
+                create: collectionIds.map((cid: string) => ({ collectionId: cid })),
+              },
+            }
+          : {}),
+      },
+      include: INCLUDE_COLLECTIONS,
+    });
+    return this.toDto(card);
   }
 
   async delete(userId: string, id: string) {
-    const doc = await this.model.findOneAndDelete({ _id: id, userId });
-    if (!doc) throw new NotFoundException();
+    const existing = await this.prisma.card.findFirst({ where: { id, userId } });
+    if (!existing) throw new NotFoundException();
+    await this.prisma.card.delete({ where: { id } });
     return { id };
   }
 
   async deleteByCollection(userId: string, collectionId: string) {
-    await this.model.deleteMany({ userId, collectionIds: collectionId });
+    const links = await this.prisma.cardCollection.findMany({
+      where: { collectionId, card: { userId } },
+      select: { cardId: true },
+    });
+    if (!links.length) return;
+    await this.prisma.card.deleteMany({
+      where: { userId, id: { in: links.map((l) => l.cardId) } },
+    });
   }
 
   async reorder(userId: string, collectionId: string, orderedIds: string[]) {
     await Promise.all(
       orderedIds.map((id, position) =>
-        this.model.updateOne({ _id: id, userId }, { $set: { position } }),
+        this.prisma.card.updateMany({ where: { id, userId }, data: { position } }),
       ),
     );
   }
 
   async bulkCreate(userId: string, cards: any[]): Promise<any[]> {
-    const docs = await this.model.insertMany(
-      cards.map((c, i) => ({ ...c, userId, position: c.position ?? i })),
+    return Promise.all(
+      cards.map((c, i) => this.create(userId, { ...c, position: c.position ?? i })),
     );
-    return docs.map((d) => this.toDto(d.toObject()));
   }
 }
